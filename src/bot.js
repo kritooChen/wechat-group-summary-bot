@@ -34,6 +34,26 @@ if (!aiApiKey || !aiBaseUrl || !aiModel) {
   process.exit(1)
 }
 
+process.on('uncaughtException', (error) => {
+  if (isTransientWechatNetworkError(error)) {
+    console.warn(`Wechat network hiccup ignored: ${error.message || error}`)
+    return
+  }
+
+  console.error('Uncaught exception:', error)
+  process.exit(1)
+})
+
+process.on('unhandledRejection', (reason) => {
+  if (isTransientWechatNetworkError(reason)) {
+    console.warn(`Wechat network hiccup ignored: ${reason.message || reason}`)
+    return
+  }
+
+  console.error('Unhandled rejection:', reason)
+  process.exit(1)
+})
+
 loadRoomMessages()
 
 const bot = WechatyBuilder.build({
@@ -50,6 +70,13 @@ bot
   })
   .on('logout', (user) => {
     console.log(`Logged out: ${user.name()}`)
+  })
+  .on('error', (error) => {
+    if (isTransientWechatNetworkError(error)) {
+      console.warn(`Wechat network error event ignored: ${error.message || error}`)
+      return
+    }
+    console.error('Bot error:', error)
   })
   .on('message', handleMessage)
   .start()
@@ -511,6 +538,18 @@ function redactSensitiveText(value) {
     .replace(/[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,}/g, '[JWT已脱敏]')
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, '$1[已脱敏]')
     .replace(/((?:api[_-]?key|token|secret|password|passwd|pwd|cookie|authorization)\s*[:=：]\s*)[^\s,;，；]+/gi, '$1[已脱敏]')
+}
+
+function isTransientWechatNetworkError(error) {
+  const text = [
+    error?.message,
+    error?.code,
+    error?.details,
+    error?.stack,
+    typeof error === 'string' ? error : '',
+  ].filter(Boolean).join('\n')
+
+  return /Client network socket disconnected|secure TLS connection|ECONNRESET|ECONNABORTED|ETIMEDOUT|ESOCKETTIMEDOUT|ENOTFOUND|EAI_AGAIN|timeout of \d+ms exceeded|状态同步超过|同步失败|socket hang up/i.test(text)
 }
 
 function loadRoomMessages() {
