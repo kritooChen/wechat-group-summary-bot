@@ -81,6 +81,11 @@ async function handleMessage(message) {
   if (!(await message.mentionSelf())) return
 
   const command = stripBotMention(text).trim()
+  if (isCrossRoomRequest(command, roomName)) {
+    await room.say(crossRoomRefusalText())
+    return
+  }
+
   const commandType = parseCommand(command)
 
   if (commandType.type === 'help') {
@@ -258,6 +263,8 @@ async function chat(roomName, roomId, senderName, prompt) {
           content: [
             personaPrompt(),
             '你是一个微信群里的 AI 助手。请用中文自然回答，可以帮群成员制定计划、整理思路、写文案、给建议、解释问题。',
+            `当前群名：${roomName}。你只能使用当前群提供的上下文回答，不能查看、引用、总结、搜索或猜测其他群的聊天记录。`,
+            '如果用户要求你读取其他群、所有群、跨群或某个非当前群的聊天记录，必须拒绝，并说明只能处理当前群。',
             '你可以参考给定的近期群聊上下文，但不要编造上下文里没有的信息。',
             '你不能实时联网搜索；当用户要求搜索最新或实时信息时，请明确说明当前只能基于模型已有知识和群聊上下文，并建议对方补充资料或链接。',
             '回答要简洁、可执行，适合直接发在微信群里。',
@@ -363,6 +370,30 @@ function parseCommand(command) {
   return { type: 'chat', prompt: command }
 }
 
+function isCrossRoomRequest(command, currentRoomName) {
+  const normalized = command.replace(/\s+/g, '')
+  if (!normalized) return false
+
+  for (const knownRoomName of roomNames.values()) {
+    if (!knownRoomName || knownRoomName === currentRoomName) continue
+    if (normalized.includes(knownRoomName.replace(/\s+/g, ''))) {
+      return true
+    }
+  }
+
+  if (/(所有群|全部群|各个群|每个群|跨群|其他群|别的群|别群|另一个群|另外一个群|其它群)/.test(normalized)) {
+    return true
+  }
+
+  const isCurrentRoom = /(本群|这个群|当前群|咱们群|我们群|本聊天|这个聊天)/.test(normalized)
+  const asksRoomHistory = /群/.test(normalized) && /(聊天记录|聊天内容|消息|记录|总结|待办|谁说了什么|说了什么)/.test(normalized)
+  return asksRoomHistory && !isCurrentRoom && !normalized.includes(currentRoomName.replace(/\s+/g, ''))
+}
+
+function crossRoomRefusalText() {
+  return '这个我不能查。为了保护群聊隐私，我只能读取当前群的聊天记录，不能查看、总结或搜索其他群。可以到对应群里 @我 处理 /抱拳'
+}
+
 function helpText() {
   return [
     '我现在能做这些事：',
@@ -424,6 +455,7 @@ function systemPromptFor(command) {
     return [
       personaPrompt(),
       '你是一个微信群聊待办提取助手。请只基于给定聊天记录提取待办事项，不要编造。',
+      '你只能处理当前群提供的聊天记录，不能引用、总结、搜索或猜测其他群的内容。',
       '输出中文，包含：待办事项、负责人、截止时间、上下文依据、需要继续确认的问题。',
       '无法确定负责人或时间时写“未明确”。涉及个人隐私时请概括，不要扩散敏感细节。',
     ].join('\n')
@@ -432,6 +464,7 @@ function systemPromptFor(command) {
   return [
     personaPrompt(),
     '你是一个微信群聊纪要助手。请只基于给定聊天记录总结，不要编造。',
+    '你只能处理当前群提供的聊天记录，不能引用、总结、搜索或猜测其他群的内容。',
     '输出中文，结构清晰，包含：一句话概览、主要话题、已形成结论、待办事项、需要继续确认的问题。',
     '涉及个人隐私时请概括，不要扩散敏感细节。',
   ].join('\n')
