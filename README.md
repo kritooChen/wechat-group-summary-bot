@@ -80,10 +80,5 @@ WEB_SEARCH_MAX_RESULTS=5
 ```
 
 配置后，`@机器人 联网搜索 最新消息` 和 `@机器人 搜索 某个概念` 会搜索网页并返回来源；没配置时，`搜索 某个概念` 会退回普通 AI 回答。
-
-## 常见问题
-
-- 扫码失败：个人微信 Web 协议/puppet 可用性不稳定，可以尝试配置其他 Wechaty puppet。
-- 登录后出现 `AssertionError [ERR_ASSERTION]: '1102' == 0`：说明微信 Web 同步接口拒绝了当前会话，通常不是模型 API 问题。可以换一个微信小号，或改用 `wechaty-puppet-service` 并配置 `WECHATY_PUPPET_SERVICE_TOKEN`。
 - 没有总结内容：机器人只缓存它在线期间看到的群消息。
 - 不想所有群都响应：在 `.env` 设置 `ALLOW_ROOMS=群名1,群名2`。
