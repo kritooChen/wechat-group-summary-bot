@@ -16,6 +16,8 @@ const webSearchMaxResults = Number.parseInt(process.env.WEB_SEARCH_MAX_RESULTS |
 const maxMessagesPerRoom = Number.parseInt(process.env.MAX_MESSAGES_PER_ROOM || '500', 10)
 const chatContextMessages = Number.parseInt(process.env.CHAT_CONTEXT_MESSAGES || '30', 10)
 const messageStorePath = process.env.MESSAGE_STORE_PATH || 'data/messages.json'
+const redactSensitiveData = process.env.REDACT_SENSITIVE_DATA !== 'false'
+const enableRoomNameHistoryMigration = process.env.ENABLE_ROOM_NAME_HISTORY_MIGRATION === 'true'
 const allowRooms = new Set(
   (process.env.ALLOW_ROOMS || '')
     .split(',')
@@ -72,13 +74,16 @@ async function handleMessage(message) {
 
   const talker = message.talker()
   const talkerName = await displayName(room, talker)
-  rememberRoomMessage(room.id, {
-    at: new Date(),
-    sender: talkerName,
-    text: stripBotMention(text),
-  })
+  const isMentioned = await message.mentionSelf()
+  if (!isMentioned) {
+    rememberRoomMessage(room.id, {
+      at: new Date(),
+      sender: talkerName,
+      text: stripBotMention(text),
+    })
+  }
 
-  if (!(await message.mentionSelf())) return
+  if (!isMentioned) return
 
   const command = stripBotMention(text).trim()
   if (isCrossRoomRequest(command, roomName)) {
@@ -146,7 +151,11 @@ async function handleMessage(message) {
 
 function rememberRoomMessage(roomId, item) {
   const messages = roomMessages.get(roomId) || []
-  messages.push(item)
+  messages.push({
+    ...item,
+    sender: redactSensitiveText(item.sender),
+    text: redactSensitiveText(item.text),
+  })
   if (messages.length > maxMessagesPerRoom) {
     messages.splice(0, messages.length - maxMessagesPerRoom)
   }
@@ -155,21 +164,31 @@ function rememberRoomMessage(roomId, item) {
 }
 
 function hydrateRoomHistory(roomId, roomName) {
+  if (!enableRoomNameHistoryMigration) return
   if (roomMessages.has(roomId)) return
 
+  const matches = []
   for (const [storedRoomId, storedRoomName] of roomNames.entries()) {
     if (storedRoomId === roomId || storedRoomName !== roomName) continue
+    if (roomMessages.has(storedRoomId)) {
+      matches.push(storedRoomId)
+    }
+  }
 
-    const messages = roomMessages.get(storedRoomId)
-    if (!messages) continue
-
-    roomMessages.set(roomId, messages)
-    roomMessages.delete(storedRoomId)
-    roomNames.delete(storedRoomId)
-    scheduleSave()
-    console.log(`Migrated message history for room "${roomName}"`)
+  if (matches.length !== 1) {
+    if (matches.length > 1) {
+      console.warn(`Skipped message history migration for duplicated room name "${roomName}"`)
+    }
     return
   }
+
+  const storedRoomId = matches[0]
+  const messages = roomMessages.get(storedRoomId)
+  roomMessages.set(roomId, messages)
+  roomMessages.delete(storedRoomId)
+  roomNames.delete(storedRoomId)
+  scheduleSave()
+  console.log(`Migrated message history for room "${roomName}"`)
 }
 
 function pickMessages(roomId, command) {
@@ -206,7 +225,7 @@ function pickMessages(roomId, command) {
 
 async function summarize(roomName, messages, command) {
   const transcript = messages
-    .map((message) => `[${formatTime(message.at)}] ${message.sender}: ${message.text}`)
+    .map((message) => `[${formatTime(message.at)}] ${redactSensitiveText(message.sender)}: ${redactSensitiveText(message.text)}`)
     .join('\n')
 
   const response = await fetch(`${aiBaseUrl}/chat/completions`, {
@@ -239,12 +258,12 @@ async function summarize(roomName, messages, command) {
   }
 
   const json = await response.json()
-  return json.choices?.[0]?.message?.content?.trim() || '模型没有返回总结内容。'
+  return redactSensitiveText(json.choices?.[0]?.message?.content?.trim() || '模型没有返回总结内容。')
 }
 
 async function chat(roomName, roomId, senderName, prompt) {
   const context = recentMessages(roomId, chatContextMessages)
-    .map((message) => `[${formatTime(message.at)}] ${message.sender}: ${message.text}`)
+    .map((message) => `[${formatTime(message.at)}] ${redactSensitiveText(message.sender)}: ${redactSensitiveText(message.text)}`)
     .join('\n')
 
   const response = await fetch(`${aiBaseUrl}/chat/completions`, {
@@ -266,6 +285,7 @@ async function chat(roomName, roomId, senderName, prompt) {
             `当前群名：${roomName}。你只能使用当前群提供的上下文回答，不能查看、引用、总结、搜索或猜测其他群的聊天记录。`,
             '如果用户要求你读取其他群、所有群、跨群或某个非当前群的聊天记录，必须拒绝，并说明只能处理当前群。',
             '你可以参考给定的近期群聊上下文，但不要编造上下文里没有的信息。',
+            '如果上下文里出现 API Key、token、密码、验证码、Cookie 等敏感信息，不要复述原文，只能概括为“有敏感信息”。',
             '你不能实时联网搜索；当用户要求搜索最新或实时信息时，请明确说明当前只能基于模型已有知识和群聊上下文，并建议对方补充资料或链接。',
             '回答要简洁、可执行，适合直接发在微信群里。',
           ].join('\n'),
@@ -274,8 +294,8 @@ async function chat(roomName, roomId, senderName, prompt) {
           role: 'user',
           content: [
             `群名：${roomName}`,
-            `提问人：${senderName}`,
-            `用户请求：${prompt}`,
+            `提问人：${redactSensitiveText(senderName)}`,
+            `用户请求：${redactSensitiveText(prompt)}`,
             '',
             '近期群聊上下文：',
             context || '无',
@@ -292,7 +312,7 @@ async function chat(roomName, roomId, senderName, prompt) {
   }
 
   const json = await response.json()
-  return json.choices?.[0]?.message?.content?.trim() || '我没有拿到模型回复。'
+  return redactSensitiveText(json.choices?.[0]?.message?.content?.trim() || '我没有拿到模型回复。')
 }
 
 async function webSearch(query) {
@@ -307,7 +327,7 @@ async function webSearch(query) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      query,
+      query: redactSensitiveText(query),
       include_answer: 'basic',
       include_raw_content: false,
       max_results: Math.min(Math.max(webSearchMaxResults, 1), 10),
@@ -320,10 +340,10 @@ async function webSearch(query) {
   }
 
   const json = await response.json()
-  const lines = [`搜索：${query}`]
+  const lines = [`搜索：${redactSensitiveText(query)}`]
 
   if (json.answer) {
-    lines.push('', json.answer)
+    lines.push('', redactSensitiveText(json.answer))
   }
 
   const results = Array.isArray(json.results) ? json.results : []
@@ -332,7 +352,7 @@ async function webSearch(query) {
     for (const result of results.slice(0, webSearchMaxResults)) {
       const title = result.title || '未命名网页'
       const url = result.url || ''
-      const content = result.content ? ` - ${result.content}` : ''
+      const content = result.content ? ` - ${redactSensitiveText(result.content)}` : ''
       lines.push(`- ${title}${url ? `：${url}` : ''}${content}`)
     }
   }
@@ -354,7 +374,7 @@ function parseCommand(command) {
     return { type: 'search', keyword: searchMatch[1].trim() }
   }
 
-  const webSearchMatch = command.match(/(?:联网搜索|网上搜索|实时搜索|搜索)\s+(.+)/)
+  const webSearchMatch = command.match(/(?:联网搜索|网上搜索|实时搜索)\s+(.+)/)
   if (webSearchMatch?.[1]?.trim() && tavilyApiKey) {
     return { type: 'webSearch', query: webSearchMatch[1].trim() }
   }
@@ -381,7 +401,7 @@ function isCrossRoomRequest(command, currentRoomName) {
     }
   }
 
-  if (/(所有群|全部群|各个群|每个群|跨群|其他群|别的群|别群|另一个群|另外一个群|其它群)/.test(normalized)) {
+  if (/(所有群|全部群|各个群|每个群|跨群|其他群|别的群|别群|另一个群|另外一个群|其它群|群列表|哪些群|加入了哪些群|在哪些群)/.test(normalized)) {
     return true
   }
 
@@ -421,7 +441,7 @@ function recentMessages(roomId, count) {
 function statusText(roomId) {
   const messages = roomMessages.get(roomId) || []
   if (messages.length === 0) {
-    return `当前群还没有缓存消息。\n历史文件：${messageStorePath}`
+    return '当前群还没有缓存消息。历史消息保存已启用，但不会在群里暴露本地文件路径。'
   }
 
   const first = messages[0]
@@ -430,7 +450,7 @@ function statusText(roomId) {
     `当前群已缓存 ${messages.length} 条文字消息。`,
     `最早：${formatTime(first.at)}`,
     `最新：${formatTime(last.at)}`,
-    `历史文件：${messageStorePath}`,
+    '历史消息保存已启用，本地路径不会在群里展示。',
   ].join('\n')
 }
 
@@ -446,7 +466,7 @@ function searchMessages(roomId, keyword) {
 
   return [
     `找到 ${matched.length} 条包含「${keyword}」的近期消息：`,
-    ...matched.map((message) => `[${formatTime(message.at)}] ${message.sender}: ${message.text}`),
+    ...matched.map((message) => `[${formatTime(message.at)}] ${redactSensitiveText(message.sender)}: ${redactSensitiveText(message.text)}`),
   ].join('\n').slice(0, 3500)
 }
 
@@ -456,6 +476,7 @@ function systemPromptFor(command) {
       personaPrompt(),
       '你是一个微信群聊待办提取助手。请只基于给定聊天记录提取待办事项，不要编造。',
       '你只能处理当前群提供的聊天记录，不能引用、总结、搜索或猜测其他群的内容。',
+      '如果聊天记录里出现 API Key、token、密码、验证码、Cookie 等敏感信息，不要复述原文，只能概括为“有敏感信息”。',
       '输出中文，包含：待办事项、负责人、截止时间、上下文依据、需要继续确认的问题。',
       '无法确定负责人或时间时写“未明确”。涉及个人隐私时请概括，不要扩散敏感细节。',
     ].join('\n')
@@ -465,6 +486,7 @@ function systemPromptFor(command) {
     personaPrompt(),
     '你是一个微信群聊纪要助手。请只基于给定聊天记录总结，不要编造。',
     '你只能处理当前群提供的聊天记录，不能引用、总结、搜索或猜测其他群的内容。',
+    '如果聊天记录里出现 API Key、token、密码、验证码、Cookie 等敏感信息，不要复述原文，只能概括为“有敏感信息”。',
     '输出中文，结构清晰，包含：一句话概览、主要话题、已形成结论、待办事项、需要继续确认的问题。',
     '涉及个人隐私时请概括，不要扩散敏感细节。',
   ].join('\n')
@@ -477,6 +499,18 @@ function personaPrompt() {
     `微信表情使用：${botEmojiStyle}`,
     '不要假装自己是人类，也不要过度套近乎；保持亲切、聪明、可靠。',
   ].join('\n')
+}
+
+function redactSensitiveText(value) {
+  if (!redactSensitiveData) return String(value || '')
+
+  return String(value || '')
+    .replace(/sk-[A-Za-z0-9_-]{16,}/g, 'sk-[已脱敏]')
+    .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, 'gh_[已脱敏]')
+    .replace(/xox[baprs]-[A-Za-z0-9-]{20,}/g, 'xox-[已脱敏]')
+    .replace(/[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,}/g, '[JWT已脱敏]')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, '$1[已脱敏]')
+    .replace(/((?:api[_-]?key|token|secret|password|passwd|pwd|cookie|authorization)\s*[:=：]\s*)[^\s,;，；]+/gi, '$1[已脱敏]')
 }
 
 function loadRoomMessages() {
@@ -494,8 +528,8 @@ function loadRoomMessages() {
       const messages = (roomData.messages || [])
         .map((message) => ({
           at: new Date(message.at),
-          sender: message.sender || '未知成员',
-          text: message.text || '',
+          sender: redactSensitiveText(message.sender || '未知成员'),
+          text: redactSensitiveText(message.text || ''),
         }))
         .filter((message) => !Number.isNaN(message.at.getTime()) && message.text)
         .slice(-maxMessagesPerRoom)

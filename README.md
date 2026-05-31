@@ -72,6 +72,7 @@ npm start
 机器人会把近期文字消息保存到 `data/messages.json`，重启后会自动恢复缓存。可以在 `.env` 里用 `MESSAGE_STORE_PATH` 修改保存位置。
 普通聊天会自动带上最近 30 条群聊作为上下文，可以在 `.env` 里用 `CHAT_CONTEXT_MESSAGES` 调整。`搜索群聊` 是查本地聊天记录。
 群聊记录按当前群隔离：机器人只能总结、搜索和回答当前群的聊天内容。有人在一个群里要求查看另一个群、所有群或跨群记录时，会直接拒绝。
+安全默认值：机器人不会保存 @ 它的指令消息；会脱敏 API Key、token、密码、Cookie 等敏感串；不会在群里展示本地历史文件路径；默认不按同名群迁移历史，避免两个同名群串数据。
 
 如果要真正联网搜索，在 `.env` 配置：
 
@@ -80,6 +81,18 @@ TAVILY_API_KEY=你的 Tavily API Key
 WEB_SEARCH_MAX_RESULTS=5
 ```
 
-配置后，`@机器人 联网搜索 最新消息` 和 `@机器人 搜索 某个概念` 会搜索网页并返回来源；没配置时，`搜索 某个概念` 会退回普通 AI 回答。
+配置后，`@机器人 联网搜索 最新消息` 会搜索网页并返回来源。为了避免把群聊内容误发给外部搜索服务，只有明确使用 `联网搜索`、`网上搜索` 或 `实时搜索` 才会调用联网搜索；`搜索群聊` 只查本群本地记录。
+
+可选安全配置：
+
+```bash
+REDACT_SENSITIVE_DATA=true
+ENABLE_ROOM_NAME_HISTORY_MIGRATION=false
+```
+
+## 常见问题
+
+- 扫码失败：个人微信 Web 协议/puppet 可用性不稳定，可以尝试配置其他 Wechaty puppet。
+- 登录后出现 `AssertionError [ERR_ASSERTION]: '1102' == 0`：说明微信 Web 同步接口拒绝了当前会话，通常不是模型 API 问题。可以换一个微信小号，或改用 `wechaty-puppet-service` 并配置 `WECHATY_PUPPET_SERVICE_TOKEN`。
 - 没有总结内容：机器人只缓存它在线期间看到的群消息。
 - 不想所有群都响应：在 `.env` 设置 `ALLOW_ROOMS=群名1,群名2`。
