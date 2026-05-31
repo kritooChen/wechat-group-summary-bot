@@ -1,0 +1,25 @@
+{
+  "name": "wechat-group-summary-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check-env.js",
+    "postinstall": "node scripts/patch-wechat4u-timeout.js",
+    "session:clear": "node scripts/clear-wechat-session.js",
+    "test:ai": "node scripts/test-ai.js",
+    "start": "node src/bot.js",
+    "start:push:wx": "WECHAT4U_SYNCCHECK_HOST=webpush.wx.qq.com node src/bot.js",
+    "start:push:wx2": "WECHAT4U_SYNCCHECK_HOST=webpush.wx2.qq.com node src/bot.js",
+    "start:push:wx8": "WECHAT4U_SYNCCHECK_HOST=webpush.wx8.qq.com node src/bot.js",
+    "start:push:web": "WECHAT4U_SYNCCHECK_HOST=webpush.web.wechat.com node src/bot.js",
+    "start:push:web2": "WECHAT4U_SYNCCHECK_HOST=webpush.web2.wechat.com node src/bot.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "wechaty": "^1.20.2"
+  }
+}
