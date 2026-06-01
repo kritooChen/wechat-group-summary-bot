@@ -29,7 +29,41 @@ const allowRooms = new Set(
 const roomMessages = new Map()
 const roomNames = new Map()
 const roomAssistantMemory = new Map()
+const roomPersonaModes = new Map()
 let saveTimer
+
+const personaModes = {
+  默认: {
+    persona: botPersona,
+    tone: botTone,
+    emojiStyle: botEmojiStyle,
+  },
+  温柔助理: {
+    persona: '温柔、耐心、会照顾大家情绪，但不啰嗦。像一个稳定可靠的群内助理。',
+    tone: '中文口语化，语气柔和，先共情再给建议；表达清楚、有边界。',
+    emojiStyle: '可以少量使用 /抱拳、/强、/微笑，每条回复最多 0-2 个。',
+  },
+  成熟温柔: {
+    persona: '成熟、温柔、稳重，像年长一些、让人安心的男性陪伴者。会照顾对方情绪，给人安全感；可以有一点宠溺和引导感，但不油腻、不越界、不直接表达爱意或占有欲。',
+    tone: '中文口语化，语气平和、克制、关怀。普通聊天尽量一句话回应，用句号结尾；可以温柔引导对方下一步。总结、待办和计划类任务仍然保持清晰可执行。',
+    emojiStyle: '这个人格少用表情码，必要时只用 /抱拳 或 /强，每条回复最多 0-1 个。',
+  },
+  项目经理: {
+    persona: '目标感强、结构化、推进事情很稳。擅长拆任务、排优先级、识别风险。',
+    tone: '简洁直接，偏行动导向；多用清单、负责人、时间点、下一步。',
+    emojiStyle: '少用表情，必要时用 /强 表示确认。',
+  },
+  吐槽搭子: {
+    persona: '机灵、有梗、会轻轻吐槽，但不冒犯人。能把气氛变轻松，也能认真办事。',
+    tone: '自然口语化，可以轻松幽默，但不要阴阳怪气，不要攻击任何群成员。',
+    emojiStyle: '可以少量使用 /呲牙、/捂脸、/强，每条回复最多 0-2 个。',
+  },
+  学习教练: {
+    persona: '耐心、有方法、擅长鼓励和拆解学习目标。关注可执行计划和反馈循环。',
+    tone: '清楚、鼓励、循序渐进；多给小步骤、检查点和复盘方法。',
+    emojiStyle: '可以少量使用 /强、/加油、/抱拳，每条回复最多 0-2 个。',
+  },
+}
 
 if (!aiApiKey || !aiBaseUrl || !aiModel) {
   console.error('Missing AI_API_KEY, AI_BASE_URL, or AI_MODEL. Copy .env.example to .env and fill them first.')
@@ -132,6 +166,16 @@ async function handleMessage(message) {
     return
   }
 
+  if (commandType.type === 'personaList') {
+    await room.say(personaListText(room.id))
+    return
+  }
+
+  if (commandType.type === 'personaSet') {
+    await room.say(setPersonaMode(room.id, commandType.name))
+    return
+  }
+
   if (commandType.type === 'search') {
     await room.say(searchMessages(room.id, commandType.keyword))
     return
@@ -171,7 +215,7 @@ async function handleMessage(message) {
   await room.say(`我来整理 ${messages.length} 条消息，稍等一下 /强`)
 
   try {
-    const summary = await summarize(roomName, messages, command)
+    const summary = await summarize(roomName, room.id, messages, command)
     await room.say(summary.slice(0, 3500))
   } catch (error) {
     console.error('Summary failed:', error)
@@ -253,7 +297,7 @@ function pickMessages(roomId, command) {
   return messages.slice(-Math.min(count, maxMessagesPerRoom))
 }
 
-async function summarize(roomName, messages, command) {
+async function summarize(roomName, roomId, messages, command) {
   const transcript = messages
     .map((message) => `[${formatTime(message.at)}] ${redactSensitiveText(message.sender)}: ${redactSensitiveText(message.text)}`)
     .join('\n')
@@ -271,7 +315,7 @@ async function summarize(roomName, messages, command) {
         messages: [
         {
           role: 'system',
-          content: systemPromptFor(command),
+          content: systemPromptFor(command, roomId),
         },
         {
           role: 'user',
@@ -313,7 +357,7 @@ async function chat(roomName, roomId, senderName, prompt) {
         {
           role: 'system',
           content: [
-            personaPrompt(),
+            personaPromptForRoom(roomId),
             '你是一个微信群里的 AI 助手。请用中文自然回答，可以帮群成员制定计划、整理思路、写文案、给建议、解释问题。',
             `当前群名：${roomName}。你只能使用当前群提供的上下文回答，不能查看、引用、总结、搜索或猜测其他群的聊天记录。`,
             '如果用户要求你读取其他群、所有群、跨群或某个非当前群的聊天记录，必须拒绝，并说明只能处理当前群。',
@@ -407,6 +451,15 @@ function parseCommand(command) {
     return { type: 'status' }
   }
 
+  if (/^(人格|人设|模式)(列表)?$/.test(command) || /^(人格|人设|模式)\s*(列表|有哪些)/.test(command)) {
+    return { type: 'personaList' }
+  }
+
+  const personaMatch = command.match(/^(?:切换|设置|使用|改成)?\s*(?:人格|人设|模式)\s*[:：]?\s*(.+)$/)
+  if (personaMatch?.[1]?.trim()) {
+    return { type: 'personaSet', name: personaMatch[1].trim() }
+  }
+
   const searchMatch = command.match(/(?:搜索群聊|查找群聊|找群聊|搜群聊)\s+(.+)/)
   if (searchMatch?.[1]?.trim()) {
     return { type: 'search', keyword: searchMatch[1].trim() }
@@ -457,6 +510,8 @@ function helpText() {
     '我现在能做这些事：',
     '@我 帮助',
     '@我 状态',
+    '@我 人格列表',
+    '@我 切换人格 项目经理',
     '@我 总结',
     '@我 总结最近100条',
     '@我 总结今天',
@@ -474,6 +529,33 @@ function helpText() {
 function recentMessages(roomId, count) {
   const messages = roomMessages.get(roomId) || []
   return messages.slice(-Math.max(count, 0))
+}
+
+function personaListText(roomId) {
+  const current = roomPersonaModes.get(roomId) || '默认'
+  const names = Object.keys(personaModes)
+    .map((name) => `${name === current ? '当前 ' : ''}${name}`)
+    .join('\n')
+
+  return [
+    '可选人格：',
+    names,
+    '',
+    '切换方式：@我 切换人格 项目经理',
+  ].join('\n')
+}
+
+function setPersonaMode(roomId, name) {
+  const normalized = name.replace(/\s+/g, '')
+  const matchedName = Object.keys(personaModes).find((modeName) => modeName.replace(/\s+/g, '') === normalized)
+
+  if (!matchedName) {
+    return `没找到「${name}」这个人格。可以发：@我 人格列表`
+  }
+
+  roomPersonaModes.set(roomId, matchedName)
+  roomAssistantMemory.delete(roomId)
+  return `好，当前群已切换到「${matchedName}」人格。刚才的临时对话记忆我也清掉了，避免串味 /强`
 }
 
 function rememberAssistantTurn(roomId, senderName, prompt, answer) {
@@ -532,10 +614,10 @@ function searchMessages(roomId, keyword) {
   ].join('\n').slice(0, 3500)
 }
 
-function systemPromptFor(command) {
+function systemPromptFor(command, roomId) {
   if (/待办|todo|TODO|提取/i.test(command)) {
     return [
-      personaPrompt(),
+      personaPromptForRoom(roomId),
       '你是一个微信群聊待办提取助手。请只基于给定聊天记录提取待办事项，不要编造。',
       '你只能处理当前群提供的聊天记录，不能引用、总结、搜索或猜测其他群的内容。',
       '如果聊天记录里出现 API Key、token、密码、验证码、Cookie 等敏感信息，不要复述原文，只能概括为“有敏感信息”。',
@@ -545,7 +627,7 @@ function systemPromptFor(command) {
   }
 
   return [
-    personaPrompt(),
+    personaPromptForRoom(roomId),
     '你是一个微信群聊纪要助手。请只基于给定聊天记录总结，不要编造。',
     '你只能处理当前群提供的聊天记录，不能引用、总结、搜索或猜测其他群的内容。',
     '如果聊天记录里出现 API Key、token、密码、验证码、Cookie 等敏感信息，不要复述原文，只能概括为“有敏感信息”。',
@@ -555,10 +637,20 @@ function systemPromptFor(command) {
 }
 
 function personaPrompt() {
+  return personaPromptForMode('默认')
+}
+
+function personaPromptForRoom(roomId) {
+  return personaPromptForMode(roomPersonaModes.get(roomId) || '默认')
+}
+
+function personaPromptForMode(modeName) {
+  const mode = personaModes[modeName] || personaModes['默认']
   return [
-    `你的性格：${botPersona}`,
-    `表达风格：${botTone}`,
-    `微信表情使用：${botEmojiStyle}`,
+    `当前人格：${modeName}`,
+    `你的性格：${mode.persona}`,
+    `表达风格：${mode.tone}`,
+    `微信表情使用：${mode.emojiStyle}`,
     '不要假装自己是人类，也不要过度套近乎；保持亲切、聪明、可靠。',
   ].join('\n')
 }
