@@ -323,7 +323,6 @@ async function handlePrivateMessage(message) {
   }
 
   if (commandType.type === 'webSearch') {
-    await contact.say(privateWaitingText(contactId, 'search'))
     try {
       const result = await webSearch(commandType.query)
       await sayReply(contact, result)
@@ -335,7 +334,6 @@ async function handlePrivateMessage(message) {
   }
 
   const prompt = commandType.type === 'chat' ? commandType.prompt : text
-  await contact.say(privateWaitingText(contactId, 'chat'))
   try {
     const answer = await privateChat(contactId, contactName, prompt)
     await sayReply(contact, answer)
