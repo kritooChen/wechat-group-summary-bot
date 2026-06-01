@@ -15,6 +15,7 @@ const tavilyApiKey = process.env.TAVILY_API_KEY || ''
 const webSearchMaxResults = Number.parseInt(process.env.WEB_SEARCH_MAX_RESULTS || '5', 10)
 const maxMessagesPerRoom = Number.parseInt(process.env.MAX_MESSAGES_PER_ROOM || '500', 10)
 const chatContextMessages = Number.parseInt(process.env.CHAT_CONTEXT_MESSAGES || '30', 10)
+const assistantMemoryMessages = Number.parseInt(process.env.ASSISTANT_MEMORY_MESSAGES || '12', 10)
 const messageStorePath = process.env.MESSAGE_STORE_PATH || 'data/messages.json'
 const redactSensitiveData = process.env.REDACT_SENSITIVE_DATA !== 'false'
 const enableRoomNameHistoryMigration = process.env.ENABLE_ROOM_NAME_HISTORY_MIGRATION === 'true'
@@ -27,6 +28,7 @@ const allowRooms = new Set(
 
 const roomMessages = new Map()
 const roomNames = new Map()
+const roomAssistantMemory = new Map()
 let saveTimer
 
 if (!aiApiKey || !aiBaseUrl || !aiModel) {
@@ -152,6 +154,7 @@ async function handleMessage(message) {
     try {
       const answer = await chat(roomName, room.id, talkerName, commandType.prompt)
       await room.say(answer.slice(0, 3500))
+      rememberAssistantTurn(room.id, talkerName, commandType.prompt, answer)
     } catch (error) {
       console.error('Chat failed:', error)
       await room.say('我刚刚卡住了，先检查一下模型 API 配置，或者稍后再试一次。')
@@ -289,8 +292,11 @@ async function summarize(roomName, messages, command) {
 }
 
 async function chat(roomName, roomId, senderName, prompt) {
-  const context = recentMessages(roomId, chatContextMessages)
+  const roomContext = recentMessages(roomId, chatContextMessages)
     .map((message) => `[${formatTime(message.at)}] ${redactSensitiveText(message.sender)}: ${redactSensitiveText(message.text)}`)
+    .join('\n')
+  const assistantContext = recentAssistantTurns(roomId)
+    .map((turn) => `[${formatTime(turn.at)}] ${turn.role}: ${redactSensitiveText(turn.text)}`)
     .join('\n')
 
   const response = await fetch(`${aiBaseUrl}/chat/completions`, {
@@ -314,6 +320,8 @@ async function chat(roomName, roomId, senderName, prompt) {
             '你可以参考给定的近期群聊上下文，但不要编造上下文里没有的信息。',
             '如果上下文里出现 API Key、token、密码、验证码、Cookie 等敏感信息，不要复述原文，只能概括为“有敏感信息”。',
             '你不能实时联网搜索；当用户要求搜索最新或实时信息时，请明确说明当前只能基于模型已有知识和群聊上下文，并建议对方补充资料或链接。',
+            '当用户说“刚才”“上面”“这个”“继续”“按这个来”等指代性表达时，优先结合近期群聊上下文和临时对话记忆来理解。',
+            '如果上下文不足以确定用户指代的内容，要先说明不确定，并问一个简短澄清问题。',
             '回答要简洁、可执行，适合直接发在微信群里。',
           ].join('\n'),
         },
@@ -325,7 +333,10 @@ async function chat(roomName, roomId, senderName, prompt) {
             `用户请求：${redactSensitiveText(prompt)}`,
             '',
             '近期群聊上下文：',
-            context || '无',
+            roomContext || '无',
+            '',
+            '本群临时对话记忆：',
+            assistantContext || '无',
           ].join('\n'),
         },
         ],
@@ -463,6 +474,30 @@ function helpText() {
 function recentMessages(roomId, count) {
   const messages = roomMessages.get(roomId) || []
   return messages.slice(-Math.max(count, 0))
+}
+
+function rememberAssistantTurn(roomId, senderName, prompt, answer) {
+  const turns = roomAssistantMemory.get(roomId) || []
+  turns.push({
+    at: new Date(),
+    role: redactSensitiveText(senderName),
+    text: redactSensitiveText(prompt),
+  })
+  turns.push({
+    at: new Date(),
+    role: '机器人',
+    text: redactSensitiveText(answer),
+  })
+
+  if (turns.length > assistantMemoryMessages) {
+    turns.splice(0, turns.length - assistantMemoryMessages)
+  }
+  roomAssistantMemory.set(roomId, turns)
+}
+
+function recentAssistantTurns(roomId) {
+  const turns = roomAssistantMemory.get(roomId) || []
+  return turns.slice(-Math.max(assistantMemoryMessages, 0))
 }
 
 function statusText(roomId) {
