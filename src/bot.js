@@ -32,6 +32,8 @@ const roomMessages = new Map()
 const roomNames = new Map()
 const roomAssistantMemory = new Map()
 const roomPersonaModes = new Map()
+const directAssistantMemory = new Map()
+const directPersonaModes = new Map()
 const roomWaitingTextMemory = new Map()
 let saveTimer
 
@@ -185,7 +187,10 @@ async function handleMessage(message) {
   if (message.self()) return
 
   const room = message.room()
-  if (!room) return
+  if (!room) {
+    await handlePrivateMessage(message)
+    return
+  }
 
   const roomName = await room.topic()
   if (allowRooms.size > 0 && !allowRooms.has(roomName)) return
@@ -258,7 +263,7 @@ async function handleMessage(message) {
     try {
       const answer = await chat(roomName, room.id, talkerName, commandType.prompt)
       await sayReply(room, answer)
-      rememberAssistantTurn(room.id, talkerName, commandType.prompt, answer)
+      rememberAssistantTurn(roomAssistantMemory, room.id, talkerName, commandType.prompt, answer)
     } catch (error) {
       console.error('Chat failed:', error)
       await room.say('我刚刚卡住了，先检查一下模型 API 配置，或者稍后再试一次。')
@@ -280,6 +285,64 @@ async function handleMessage(message) {
   } catch (error) {
     console.error('Summary failed:', error)
     await room.say('这次总结没跑起来，先检查一下模型 API Key、Base URL 和 Model 配置。')
+  }
+}
+
+async function handlePrivateMessage(message) {
+  const text = message.text().trim()
+  if (!text) return
+
+  const contact = message.talker()
+  const contactId = directContactId(contact)
+  const contactName = directDisplayName(contact)
+  const commandType = parseCommand(text)
+
+  if (commandType.type === 'help') {
+    await contact.say(privateHelpText())
+    return
+  }
+
+  if (commandType.type === 'status') {
+    await contact.say(privateStatusText(contactId))
+    return
+  }
+
+  if (commandType.type === 'personaList') {
+    await contact.say(privatePersonaListText(contactId))
+    return
+  }
+
+  if (commandType.type === 'personaSet') {
+    await contact.say(setPrivatePersonaMode(contactId, commandType.name))
+    return
+  }
+
+  if (commandType.type === 'search' || commandType.type === 'summary') {
+    await contact.say('私聊里我不能读取或总结任何微信群记录。需要处理某个群时，请到对应群里 @我；在私聊里可以直接问我问题、写文案、定计划或用“联网搜索 关键词”。')
+    return
+  }
+
+  if (commandType.type === 'webSearch') {
+    await contact.say(privateWaitingText(contactId, 'search'))
+    try {
+      const result = await webSearch(commandType.query)
+      await sayReply(contact, result)
+    } catch (error) {
+      console.error('Private web search failed:', error)
+      await contact.say('联网搜索失败了。如果还没配置搜索服务，需要在 .env 里设置 TAVILY_API_KEY。')
+    }
+    return
+  }
+
+  const prompt = commandType.type === 'chat' ? commandType.prompt : text
+  await contact.say(privateWaitingText(contactId, 'chat'))
+  try {
+    const answer = await privateChat(contactId, contactName, prompt)
+    await sayReply(contact, answer)
+    rememberAssistantTurn(directAssistantMemory, contactId, contactName, prompt, answer)
+  } catch (error) {
+    console.error('Private chat failed:', error)
+    await contact.say('我刚刚卡住了，先检查一下模型 API 配置，或者稍后再试一次。')
   }
 }
 
@@ -399,7 +462,7 @@ async function chat(roomName, roomId, senderName, prompt) {
   const roomContext = recentMessages(roomId, chatContextMessages)
     .map((message) => `[${formatTime(message.at)}] ${redactSensitiveText(message.sender)}: ${redactSensitiveText(message.text)}`)
     .join('\n')
-  const assistantContext = recentAssistantTurns(roomId)
+  const assistantContext = recentAssistantTurns(roomAssistantMemory, roomId)
     .map((turn) => `[${formatTime(turn.at)}] ${turn.role}: ${redactSensitiveText(turn.text)}`)
     .join('\n')
 
@@ -440,6 +503,59 @@ async function chat(roomName, roomId, senderName, prompt) {
             roomContext || '无',
             '',
             '本群临时对话记忆：',
+            assistantContext || '无',
+          ].join('\n'),
+        },
+        ],
+      }),
+    ),
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`AI request failed: ${response.status} ${body}`)
+  }
+
+  const json = await response.json()
+  return redactSensitiveText(json.choices?.[0]?.message?.content?.trim() || '我没有拿到模型回复。')
+}
+
+async function privateChat(contactId, senderName, prompt) {
+  const assistantContext = recentAssistantTurns(directAssistantMemory, contactId)
+    .map((turn) => `[${formatTime(turn.at)}] ${turn.role}: ${redactSensitiveText(turn.text)}`)
+    .join('\n')
+
+  const response = await fetch(`${aiBaseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${aiApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(
+      withDeepSeekOptions({
+        model: aiModel,
+        temperature: 0.4,
+        messages: [
+        {
+          role: 'system',
+          content: [
+            personaPromptForPrivate(contactId),
+            '你是微信私聊里的 AI 助手。请用中文自然回答，可以帮用户制定计划、整理思路、写文案、给建议、解释问题。',
+            '当前是用户与你之间的一对一私聊。你不能读取、引用、总结、搜索或猜测任何微信群聊记录。',
+            '如果用户要求你处理群聊内容，请说明需要到对应群里 @你；除非用户在私聊里主动粘贴内容，否则不要假设你看得到群消息。',
+            '你可以参考本次私聊临时对话记忆，但不要编造记忆里没有的信息。',
+            '如果上下文里出现 API Key、token、密码、验证码、Cookie 等敏感信息，不要复述原文，只能概括为“有敏感信息”。',
+            '你不能实时联网搜索；当用户要求搜索最新或实时信息时，请明确说明当前只能基于模型已有知识，并建议使用“联网搜索 关键词”。',
+            '回答要简洁、可执行，适合直接发在微信私聊里。',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: [
+            `联系人：${redactSensitiveText(senderName)}`,
+            `用户请求：${redactSensitiveText(prompt)}`,
+            '',
+            '本次私聊临时对话记忆：',
             assistantContext || '无',
           ].join('\n'),
         },
@@ -616,8 +732,16 @@ function replySplitIndex(text, limit) {
 
 function waitingText(roomId, kind, count = 0) {
   const modeName = roomPersonaModes.get(roomId) || '默认'
+  return waitingTextForMode(modeName, `${roomId}:${kind}`, kind, count)
+}
+
+function privateWaitingText(contactId, kind, count = 0) {
+  const modeName = directPersonaModes.get(contactId) || '默认'
+  return waitingTextForMode(modeName, `private:${contactId}:${kind}`, kind, count)
+}
+
+function waitingTextForMode(modeName, lastKey, kind, count = 0) {
   const texts = waitingTextByMode[modeName]?.[kind] || waitingTextByMode['默认'][kind]
-  const lastKey = `${roomId}:${kind}`
   const lastText = roomWaitingTextMemory.get(lastKey)
   const candidates = texts
     .map((text) => (typeof text === 'function' ? text(count) : text))
@@ -650,6 +774,22 @@ function helpText() {
   ].join('\n')
 }
 
+function privateHelpText() {
+  return [
+    '私聊里我现在能做这些事：',
+    '帮助',
+    '状态',
+    '人格列表',
+    '切换人格 项目经理',
+    '帮我定一个计划',
+    '问 这个方案怎么安排',
+    '搜索 某个概念',
+    '联网搜索 最新消息',
+    '',
+    '群聊总结、搜索群聊记录需要到对应群里 @我，私聊里我不会读取任何群消息。',
+  ].join('\n')
+}
+
 function recentMessages(roomId, count) {
   const messages = roomMessages.get(roomId) || []
   return messages.slice(-Math.max(count, 0))
@@ -657,6 +797,15 @@ function recentMessages(roomId, count) {
 
 function personaListText(roomId) {
   const current = roomPersonaModes.get(roomId) || '默认'
+  return personaListTextForCurrent(current, '切换方式：@我 切换人格 项目经理')
+}
+
+function privatePersonaListText(contactId) {
+  const current = directPersonaModes.get(contactId) || '默认'
+  return personaListTextForCurrent(current, '切换方式：切换人格 项目经理')
+}
+
+function personaListTextForCurrent(current, usageText) {
   const names = Object.keys(personaModes)
     .map((name) => `${name === current ? '当前 ' : ''}${name}`)
     .join('\n')
@@ -665,7 +814,7 @@ function personaListText(roomId) {
     '可选人格：',
     names,
     '',
-    '切换方式：@我 切换人格 项目经理',
+    usageText,
   ].join('\n')
 }
 
@@ -682,8 +831,21 @@ function setPersonaMode(roomId, name) {
   return `好，当前群已切换到「${matchedName}」人格。刚才的临时对话记忆我也清掉了，避免串味 /强`
 }
 
-function rememberAssistantTurn(roomId, senderName, prompt, answer) {
-  const turns = roomAssistantMemory.get(roomId) || []
+function setPrivatePersonaMode(contactId, name) {
+  const normalized = name.replace(/\s+/g, '')
+  const matchedName = Object.keys(personaModes).find((modeName) => modeName.replace(/\s+/g, '') === normalized)
+
+  if (!matchedName) {
+    return `没找到「${name}」这个人格。可以发：人格列表`
+  }
+
+  directPersonaModes.set(contactId, matchedName)
+  directAssistantMemory.delete(contactId)
+  return `好，当前私聊已切换到「${matchedName}」人格。刚才的临时对话记忆我也清掉了，避免串味 /强`
+}
+
+function rememberAssistantTurn(memoryMap, scopeId, senderName, prompt, answer) {
+  const turns = memoryMap.get(scopeId) || []
   turns.push({
     at: new Date(),
     role: redactSensitiveText(senderName),
@@ -698,12 +860,21 @@ function rememberAssistantTurn(roomId, senderName, prompt, answer) {
   if (turns.length > assistantMemoryMessages) {
     turns.splice(0, turns.length - assistantMemoryMessages)
   }
-  roomAssistantMemory.set(roomId, turns)
+  memoryMap.set(scopeId, turns)
 }
 
-function recentAssistantTurns(roomId) {
-  const turns = roomAssistantMemory.get(roomId) || []
+function recentAssistantTurns(memoryMap, scopeId) {
+  const turns = memoryMap.get(scopeId) || []
   return turns.slice(-Math.max(assistantMemoryMessages, 0))
+}
+
+function privateStatusText(contactId) {
+  const turns = directAssistantMemory.get(contactId) || []
+  return [
+    '私聊功能已启用。',
+    `当前私聊临时对话记忆 ${turns.length} 条。`,
+    '私聊不会读取或总结任何微信群记录；需要处理群聊内容时，请到对应群里 @我。',
+  ].join('\n')
 }
 
 function statusText(roomId) {
@@ -766,6 +937,10 @@ function personaPrompt() {
 
 function personaPromptForRoom(roomId) {
   return personaPromptForMode(roomPersonaModes.get(roomId) || '默认')
+}
+
+function personaPromptForPrivate(contactId) {
+  return personaPromptForMode(directPersonaModes.get(contactId) || '默认')
 }
 
 function personaPromptForMode(modeName) {
@@ -888,6 +1063,14 @@ async function displayName(room, contact) {
   } catch {
     return contact.name() || '未知成员'
   }
+}
+
+function directDisplayName(contact) {
+  return contact.name() || contact.id || '未知联系人'
+}
+
+function directContactId(contact) {
+  return contact.id || contact.name() || 'unknown-contact'
 }
 
 function stripBotMention(text) {
