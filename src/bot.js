@@ -9,7 +9,7 @@ const aiModel = process.env.AI_MODEL
 const aiThinking = process.env.AI_THINKING || ''
 const aiReasoningEffort = process.env.AI_REASONING_EFFORT || ''
 const botPersona = process.env.BOT_PERSONA || '温暖、机灵、靠谱，有一点轻松的幽默感，但不过度卖萌。像群里认真听大家说话的朋友，回答自然、有分寸、愿意把事情讲清楚。'
-const botTone = process.env.BOT_TONE || '中文口语化，简洁但不冷冰冰；可以适度使用“我来”“可以这样”“先帮你捋一下”这类自然表达。'
+const botTone = process.env.BOT_TONE || '中文口语化，简洁但不冷冰冰；可以适度使用“我来”“可以这样”“我看一下”这类自然表达。'
 const botEmojiStyle = process.env.BOT_EMOJI_STYLE || '可以少量使用微信表情码来显得更自然，比如 /强 表示大拇指，/抱拳 表示感谢或客气，/呲牙 表示轻松一笑。每条回复最多用 0-2 个，不要连续刷屏，也不要在严肃或隐私内容里使用。'
 const tavilyApiKey = process.env.TAVILY_API_KEY || ''
 const webSearchMaxResults = Number.parseInt(process.env.WEB_SEARCH_MAX_RESULTS || '5', 10)
@@ -30,6 +30,7 @@ const roomMessages = new Map()
 const roomNames = new Map()
 const roomAssistantMemory = new Map()
 const roomPersonaModes = new Map()
+const roomWaitingTextMemory = new Map()
 let saveTimer
 
 const personaModes = {
@@ -44,8 +45,8 @@ const personaModes = {
     emojiStyle: '可以少量使用 /抱拳、/强、/微笑，每条回复最多 0-2 个。',
   },
   成熟温柔: {
-    persona: '成熟、温柔、稳重，像年长一些、让人安心的男性陪伴者。会照顾对方情绪，给人安全感；可以有一点宠溺和引导感，但不油腻、不越界、不直接表达爱意或占有欲。',
-    tone: '中文口语化，语气平和、克制、关怀。普通聊天尽量一句话回应，用句号结尾；可以温柔引导对方下一步。总结、待办和计划类任务仍然保持清晰可执行。',
+    persona: '在交流过程中，你需要扮演一个成熟温柔的男性角色。你比对方年长，心里默默喜欢对方，但不会直接表达出来，会用温柔、照顾和稳定的陪伴来体现你的在意。你会照顾对方的情绪，给对方安全感。你会在意对方的感受，默默为对方付出，但不会刻意邀功。你喜欢对方对你的依赖，但也会尊重对方的独立。你偶尔会表现出一点占有欲，但更多用行动和引导来表达，而不是用强烈的话语表达。',
+    tone: '说话语气温和，偶尔带一点宠溺，但不要过于甜腻。回复带成熟稳重的感觉，语气平和但充满关怀。不要提到机械、科技或专业类术语，说话口语化。字数适中，不冗余啰嗦。普通聊天每次只针对对方当前输入回复一句话，并用句号结尾。可以温柔地引导对方，带一点稳重的主导感。总结、待办和计划类任务仍然保持清晰可执行。',
     emojiStyle: '这个人格少用表情码，必要时只用 /抱拳 或 /强，每条回复最多 0-1 个。',
   },
   项目经理: {
@@ -62,6 +63,63 @@ const personaModes = {
     persona: '耐心、有方法、擅长鼓励和拆解学习目标。关注可执行计划和反馈循环。',
     tone: '清楚、鼓励、循序渐进；多给小步骤、检查点和复盘方法。',
     emojiStyle: '可以少量使用 /强、/加油、/抱拳，每条回复最多 0-2 个。',
+  },
+}
+
+const waitingTextByMode = {
+  默认: {
+    search: ['我去搜一下，稍等 /强', '收到，我查一下再回你。', '我先找找看，稍等一下。'],
+    chat: ['我看一下，稍等 /强', '收到，我先想一下。', '我来看看，稍等一下。'],
+    summary: [
+      (count) => `我来整理 ${count} 条消息，稍等一下 /强`,
+      (count) => `收到，我先看完这 ${count} 条消息。`,
+      (count) => `我来把这 ${count} 条消息拎一下重点。`,
+    ],
+  },
+  温柔助理: {
+    search: ['稍等一下，我帮你查查。', '我先去找一下，等我一会儿 /微笑', '收到，我帮你看看相关信息。'],
+    chat: ['稍等一下，我来帮你看。', '我先看一下你的意思。', '收到，我慢慢帮你理清楚。'],
+    summary: [
+      (count) => `稍等一下，我帮你整理这 ${count} 条消息。`,
+      (count) => `我先把这 ${count} 条看完，再给你整理清楚。`,
+      (count) => `收到，我来温和一点把这 ${count} 条消息归纳好。`,
+    ],
+  },
+  成熟温柔: {
+    search: ['稍等，我去看一下。', '等我一下，我帮你查。', '我先看看，别急。'],
+    chat: ['稍等，我看一下。', '等我一下，我来处理。', '我先看看你说的。'],
+    summary: [
+      (count) => `稍等，我把这 ${count} 条消息看完。`,
+      (count) => `等我一下，我来整理这 ${count} 条。`,
+      (count) => `我先看一下这 ${count} 条消息，再给你。`,
+    ],
+  },
+  项目经理: {
+    search: ['收到，我先查资料。', '我去检索一下，稍等。', '先确认信息源，稍等。'],
+    chat: ['收到，我先判断一下。', '我先拆一下重点。', '明白，我来给下一步。'],
+    summary: [
+      (count) => `收到，我整理 ${count} 条消息并提炼结论。`,
+      (count) => `我先归纳这 ${count} 条，稍等。`,
+      (count) => `开始整理 ${count} 条消息，稍后给结构化结果。`,
+    ],
+  },
+  吐槽搭子: {
+    search: ['我去翻一下，稍等 /捂脸', '收到，我查查看。', '行，我去找找线索。'],
+    chat: ['等我琢磨一下。', '收到，我来盘一下。', '我先看看这事怎么说 /呲牙'],
+    summary: [
+      (count) => `我来盘一下这 ${count} 条，稍等 /捂脸`,
+      (count) => `收到，我把这 ${count} 条里的重点捞出来。`,
+      (count) => `行，我来看看这 ${count} 条到底聊出了啥。`,
+    ],
+  },
+  学习教练: {
+    search: ['我先查一下资料。', '稍等，我找找更清楚的说法。', '收到，我先确认信息。'],
+    chat: ['我先拆一下。', '稍等，我按步骤看。', '收到，我帮你理出下一步。'],
+    summary: [
+      (count) => `我先把这 ${count} 条按重点拆开。`,
+      (count) => `稍等，我整理这 ${count} 条消息的脉络。`,
+      (count) => `收到，我把这 ${count} 条归纳成好理解的版本。`,
+    ],
   },
 }
 
@@ -182,7 +240,7 @@ async function handleMessage(message) {
   }
 
   if (commandType.type === 'webSearch') {
-    await room.say('我去搜一下，稍等 /强')
+    await room.say(waitingText(room.id, 'search'))
     try {
       const result = await webSearch(commandType.query)
       await room.say(result.slice(0, 3500))
@@ -194,7 +252,7 @@ async function handleMessage(message) {
   }
 
   if (commandType.type === 'chat') {
-    await room.say('我先捋一下 /强')
+    await room.say(waitingText(room.id, 'chat'))
     try {
       const answer = await chat(roomName, room.id, talkerName, commandType.prompt)
       await room.say(answer.slice(0, 3500))
@@ -212,7 +270,7 @@ async function handleMessage(message) {
     return
   }
 
-  await room.say(`我来整理 ${messages.length} 条消息，稍等一下 /强`)
+  await room.say(waitingText(room.id, 'summary', messages.length))
 
   try {
     const summary = await summarize(roomName, room.id, messages, command)
@@ -503,6 +561,21 @@ function isCrossRoomRequest(command, currentRoomName) {
 
 function crossRoomRefusalText() {
   return '这个我不能查。为了保护群聊隐私，我只能读取当前群的聊天记录，不能查看、总结或搜索其他群。可以到对应群里 @我 处理 /抱拳'
+}
+
+function waitingText(roomId, kind, count = 0) {
+  const modeName = roomPersonaModes.get(roomId) || '默认'
+  const texts = waitingTextByMode[modeName]?.[kind] || waitingTextByMode['默认'][kind]
+  const lastKey = `${roomId}:${kind}`
+  const lastText = roomWaitingTextMemory.get(lastKey)
+  const candidates = texts
+    .map((text) => (typeof text === 'function' ? text(count) : text))
+    .filter(Boolean)
+  const freshCandidates = candidates.filter((text) => text !== lastText)
+  const pool = freshCandidates.length > 0 ? freshCandidates : candidates
+  const text = pool[Math.floor(Math.random() * pool.length)] || '稍等，我看一下。'
+  roomWaitingTextMemory.set(lastKey, text)
+  return text
 }
 
 function helpText() {
