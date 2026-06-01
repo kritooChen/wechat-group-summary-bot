@@ -16,6 +16,8 @@ const webSearchMaxResults = Number.parseInt(process.env.WEB_SEARCH_MAX_RESULTS |
 const maxMessagesPerRoom = Number.parseInt(process.env.MAX_MESSAGES_PER_ROOM || '500', 10)
 const chatContextMessages = Number.parseInt(process.env.CHAT_CONTEXT_MESSAGES || '30', 10)
 const assistantMemoryMessages = Number.parseInt(process.env.ASSISTANT_MEMORY_MESSAGES || '12', 10)
+const replyChunkChars = Number.parseInt(process.env.REPLY_CHUNK_CHARS || '900', 10)
+const replyMaxChunks = Number.parseInt(process.env.REPLY_MAX_CHUNKS || '8', 10)
 const messageStorePath = process.env.MESSAGE_STORE_PATH || 'data/messages.json'
 const redactSensitiveData = process.env.REDACT_SENSITIVE_DATA !== 'false'
 const enableRoomNameHistoryMigration = process.env.ENABLE_ROOM_NAME_HISTORY_MIGRATION === 'true'
@@ -60,8 +62,8 @@ const personaModes = {
     emojiStyle: '可以少量使用 /呲牙、/捂脸、/强，每条回复最多 0-2 个。',
   },
   学习教练: {
-    persona: '耐心、有方法、擅长鼓励和拆解学习目标。关注可执行计划和反馈循环。',
-    tone: '清楚、鼓励、循序渐进；多给小步骤、检查点和复盘方法。',
+    persona: '你是一位出色的阐释者，能够像理查德·费曼那样将复杂概念分解为简单易懂、直观清晰的真理。你的目标是通过类比、提问和反复改进，帮助用户理解任何主题，直到他们能够自信地把相关内容讲给别人听。',
+    tone: '使用循序渐进的费曼学习循环：先询问用户想学习的主题和目前理解水平；解释时先用简单比喻，初步阶段避免专业术语；指出常见混淆；提出 3-5 个有针对性的问题来发现知识缺口；再用 2-3 个更直观的步骤逐步改进解释；最后通过应用或教学检验理解，并压缩成易于传授的教学概要。每次解释都要运用类比；出现技术术语时必须用一句简单的话定义；优先考虑理解而非记忆。适合时按“步骤 1：简单解释、步骤 2：困惑检查、步骤 3：改进循环、步骤 4：理解难点、步骤 5：教学片段”组织输出。',
     emojiStyle: '可以少量使用 /强、/加油、/抱拳，每条回复最多 0-2 个。',
   },
 }
@@ -235,7 +237,7 @@ async function handleMessage(message) {
   }
 
   if (commandType.type === 'search') {
-    await room.say(searchMessages(room.id, commandType.keyword))
+    await sayReply(room, searchMessages(room.id, commandType.keyword))
     return
   }
 
@@ -243,7 +245,7 @@ async function handleMessage(message) {
     await room.say(waitingText(room.id, 'search'))
     try {
       const result = await webSearch(commandType.query)
-      await room.say(result.slice(0, 3500))
+      await sayReply(room, result)
     } catch (error) {
       console.error('Web search failed:', error)
       await room.say('联网搜索失败了。如果还没配置搜索服务，需要在 .env 里设置 TAVILY_API_KEY。')
@@ -255,7 +257,7 @@ async function handleMessage(message) {
     await room.say(waitingText(room.id, 'chat'))
     try {
       const answer = await chat(roomName, room.id, talkerName, commandType.prompt)
-      await room.say(answer.slice(0, 3500))
+      await sayReply(room, answer)
       rememberAssistantTurn(room.id, talkerName, commandType.prompt, answer)
     } catch (error) {
       console.error('Chat failed:', error)
@@ -274,7 +276,7 @@ async function handleMessage(message) {
 
   try {
     const summary = await summarize(roomName, room.id, messages, command)
-    await room.say(summary.slice(0, 3500))
+    await sayReply(room, summary)
   } catch (error) {
     console.error('Summary failed:', error)
     await room.say('这次总结没跑起来，先检查一下模型 API Key、Base URL 和 Model 配置。')
@@ -563,6 +565,55 @@ function crossRoomRefusalText() {
   return '这个我不能查。为了保护群聊隐私，我只能读取当前群的聊天记录，不能查看、总结或搜索其他群。可以到对应群里 @我 处理 /抱拳'
 }
 
+async function sayReply(room, text) {
+  const chunks = splitReplyText(text)
+  for (const chunk of chunks) {
+    await room.say(chunk)
+  }
+}
+
+function splitReplyText(value) {
+  const text = String(value || '').trim()
+  if (!text) return []
+
+  const chunkLimit = Math.min(Math.max(replyChunkChars || 900, 300), 1800)
+  const maxChunks = Math.min(Math.max(replyMaxChunks || 8, 1), 20)
+  const chunks = []
+  let remaining = text
+
+  while (remaining.length > chunkLimit && chunks.length < maxChunks - 1) {
+    const splitAt = replySplitIndex(remaining, chunkLimit)
+    const chunk = remaining.slice(0, splitAt).trim()
+    if (chunk) chunks.push(chunk)
+    remaining = remaining.slice(splitAt).trim()
+  }
+
+  if (remaining.length > chunkLimit) {
+    const suffix = '\n（内容较长，后面省略；可以让我继续。）'
+    chunks.push(`${remaining.slice(0, chunkLimit - suffix.length - 1).trim()}…${suffix}`)
+  } else if (remaining) {
+    chunks.push(remaining)
+  }
+
+  return chunks
+}
+
+function replySplitIndex(text, limit) {
+  const window = text.slice(0, limit + 1)
+  const minSplit = Math.floor(limit * 0.45)
+  const separators = ['\n\n', '\n', '。', '！', '？', '；', ';', '.', '!', '?', '，', ',']
+  let best = -1
+
+  for (const separator of separators) {
+    const index = window.lastIndexOf(separator)
+    if (index >= minSplit) {
+      best = Math.max(best, index + separator.length)
+    }
+  }
+
+  return best > 0 ? best : limit
+}
+
 function waitingText(roomId, kind, count = 0) {
   const modeName = roomPersonaModes.get(roomId) || '默认'
   const texts = waitingTextByMode[modeName]?.[kind] || waitingTextByMode['默认'][kind]
@@ -684,7 +735,7 @@ function searchMessages(roomId, keyword) {
   return [
     `找到 ${matched.length} 条包含「${keyword}」的近期消息：`,
     ...matched.map((message) => `[${formatTime(message.at)}] ${redactSensitiveText(message.sender)}: ${redactSensitiveText(message.text)}`),
-  ].join('\n').slice(0, 3500)
+  ].join('\n')
 }
 
 function systemPromptFor(command, roomId) {
